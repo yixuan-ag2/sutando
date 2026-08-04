@@ -1216,7 +1216,13 @@ def _send_reply(channel: str, thread_ts: str | None, text: str, task_id: str | N
     additive: the annotation was `-> None` and no existing caller reads it.
     """
     if not text:
-        return True  # nothing to deliver is not a delivery failure
+        # Unreachable from every current caller: both the task-reply and
+        # proactive drains guard empty text before calling (slack
+        # `if not text: claim.unlink()`, telegram :928). Kept as a contract
+        # statement rather than removed, because a future caller without that
+        # guard must get "consume it" — returning False would release an empty
+        # file, re-claim it, and loop forever.
+        return True  # pragma: no cover — see above; no caller reaches this
 
     parsed = parse_markers(text)
     clean_text = parsed.body
@@ -1503,12 +1509,12 @@ def result_watcher():
                                 print(f"  [proactive] sent to {owner_id}: {text[:80]}", flush=True)
                                 claim.unlink(missing_ok=True)
                             else:
-                                _release_proactive_claim(claim, "Slack refused the send")
+                                release_claim(claim, "Slack refused the send")
                         except Exception as e:
                             # RELEASE, not keep: the claim is a `.sending` name
                             # and every poller scans `.txt`, so a kept claim is
                             # invisible until the next restart's orphan sweep.
-                            _release_proactive_claim(claim, f"send raised: {e}")
+                            release_claim(claim, f"send raised: {e}")
                     else:
                         # RELEASE, do not delete. On a host where Slack has no
                         # owner (no access.json / TOFU never ran) this is the
@@ -1517,7 +1523,7 @@ def result_watcher():
                         # — so deleting here destroys messages routed to another
                         # bridge. Measured live by the owner 2026-08-04: 65 such
                         # events across 52 distinct files on this host.
-                        _release_proactive_claim(claim, "no owner in allowFrom")
+                        release_claim(claim, "no owner in allowFrom")
 
             # Heartbeat (used by health-check.py)
             now = time.time()
@@ -1562,11 +1568,6 @@ def _no_events_hint_thread():
             flush=True,
         )
 
-
-
-def _release_proactive_claim(claim, reason: str) -> bool:
-    """Adapter binding for the shared claim-release policy (src/proactive_recovery)."""
-    return release_claim(claim, reason)
 
 
 def _recover_orphan_sending_files() -> int:

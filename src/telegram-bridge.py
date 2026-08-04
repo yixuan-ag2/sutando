@@ -449,15 +449,6 @@ def send_reply(chat_id, text, task_id: str | None = None) -> dict:
 
     return {"text_chunks": text_chunks, "files_sent": files_sent, "ok": delivered_ok}
 
-def _release_proactive_claim(claim, reason: str) -> bool:
-    """Adapter binding for the shared claim-release policy (src/proactive_recovery).
-
-    Policy lives in `src/` per the shared-result-file-lifecycle rule; the bridge
-    only supplies the path it claimed.
-    """
-    return release_claim(claim, reason)
-
-
 def _recover_orphan_sending_files() -> int:
     """Recover this adapter's stranded proactive delivery claims."""
     return recover_orphan_sending_files(RESULTS_DIR)
@@ -951,7 +942,7 @@ def main():  # pragma: no cover
                             # from every other poller (they scan `.txt`). On a
                             # host where THIS bridge has no owner, deleting here
                             # destroys a message another bridge would have sent.
-                            _release_proactive_claim(f, "no owner in allowFrom")
+                            release_claim(f, "no owner in allowFrom")
                             continue
                         try:
                             _s = send_reply(int(owner_id), text)
@@ -973,9 +964,9 @@ def main():  # pragma: no cover
                                 print(f"  [proactive] sent to {owner_id}: {text[:80]}")
                                 f.unlink(missing_ok=True)
                             else:
-                                _release_proactive_claim(f, "send reported ok=False")
+                                release_claim(f, "send reported ok=False")
                         except Exception as e:
-                            _release_proactive_claim(f, f"send raised: {e}")
+                            release_claim(f, f"send raised: {e}")
         except Exception as e:
             print(f"  [proactive] poll error: {e}")
 
