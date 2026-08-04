@@ -45,7 +45,7 @@ except Exception:  # pragma: no cover — bridge must keep running
         return False
 from task_priority import default_priority_for_source  # noqa: E402
 from optional_script import run_optional_script as _run_optional_script_shared  # noqa: E402
-from proactive_recovery import recover_orphan_sending_files  # noqa: E402
+from proactive_recovery import recover_orphan_sending_files, release_claim  # noqa: E402
 
 # Observability: emit channel.telegram.<in|out> into the local obs spine
 # (src/observability). Guarded so a missing module never crashes the bridge.
@@ -448,6 +448,15 @@ def send_reply(chat_id, text, task_id: str | None = None) -> dict:
             print(f"  file marker, file not found — likely a prose quotation: {fpath}", flush=True)
 
     return {"text_chunks": text_chunks, "files_sent": files_sent, "ok": delivered_ok}
+
+def _release_proactive_claim(claim, reason: str) -> bool:
+    """Adapter binding for the shared claim-release policy (src/proactive_recovery).
+
+    Policy lives in `src/` per the shared-result-file-lifecycle rule; the bridge
+    only supplies the path it claimed.
+    """
+    return release_claim(claim, reason)
+
 
 def _recover_orphan_sending_files() -> int:
     """Recover this adapter's stranded proactive delivery claims."""
@@ -935,8 +944,14 @@ def main():  # pragma: no cover
                             access_data = {}
                         owner_id = _resolve_proactive_owner_id(env_override, access_data)
                         if owner_id is None:
-                            print(f"  [proactive] no owner in allowFrom, skipping {f.name}")
-                            f.unlink(missing_ok=True)
+                            # RELEASE the claim, do not delete. This bridge
+                            # cannot deliver, but another one may: proactive
+                            # files are not addressed to a specific bridge, and
+                            # the claim-by-rename above already hid this file
+                            # from every other poller (they scan `.txt`). On a
+                            # host where THIS bridge has no owner, deleting here
+                            # destroys a message another bridge would have sent.
+                            _release_proactive_claim(f, "no owner in allowFrom")
                             continue
                         try:
                             _s = send_reply(int(owner_id), text)
@@ -949,15 +964,18 @@ def main():  # pragma: no cover
                                     outcome="ok" if _s["ok"] else "error",
                                     data={"text_chunks": _s["text_chunks"], "file_count": _s["files_sent"]},
                                 )
-                            print(f"  [proactive] sent to {owner_id}: {text[:80]}")
-                            # Delete ONLY after a send that did not raise. This
-                            # sat one level out, so a rejected DM was caught,
-                            # logged, and the file removed anyway — the message
-                            # was destroyed on the owner's notification path.
-                            # Keeping it lets the next poll retry.
-                            f.unlink(missing_ok=True)
+                            # Gate cleanup on DELIVERY, not on "did not raise".
+                            # `send_reply` documents (:394-402) that api() and
+                            # send_file() swallow HTTP errors and report
+                            # `ok=False` rather than raising — so an exception
+                            # handler alone never sees the common failure.
+                            if _s["ok"]:
+                                print(f"  [proactive] sent to {owner_id}: {text[:80]}")
+                                f.unlink(missing_ok=True)
+                            else:
+                                _release_proactive_claim(f, "send reported ok=False")
                         except Exception as e:
-                            print(f"  [proactive] failed (keeping {f.name} for retry): {e}")
+                            _release_proactive_claim(f, f"send raised: {e}")
         except Exception as e:
             print(f"  [proactive] poll error: {e}")
 

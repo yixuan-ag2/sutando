@@ -62,7 +62,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from task_priority import default_priority_for_source  # noqa: E402
 from optional_script import run_optional_script as _run_optional_script_shared  # noqa: E402
 from presenter_mode import presenter_mode_active  # noqa: E402
-from proactive_recovery import recover_orphan_sending_files  # noqa: E402
+from proactive_recovery import recover_orphan_sending_files, release_claim  # noqa: E402
 
 # Observability: emit channel.slack.<in|out> into the local obs spine
 # (src/observability). Guarded so a missing module never crashes the bridge.
@@ -1485,20 +1485,21 @@ def result_watcher():
                             _send_reply(dm_channel, None, text, access_tier="owner")  # proactive → owner
                             mark_proactive_delivered(STATE_DIR, delivery_id)
                             print(f"  [proactive] sent to {owner_id}: {text[:80]}", flush=True)
-                            # Delete ONLY after a send that did not raise. This
-                            # sat below the if/else, so a rejected DM was caught,
-                            # logged, and the claim removed anyway — destroying
-                            # the message on the owner's notification path. The
-                            # task-reply branch a few lines up already gets this
-                            # right ("Keep both ... so the next poll can retry").
                             claim.unlink(missing_ok=True)
                         except Exception as e:
-                            print(f"  [proactive] failed (keeping {claim.name} for retry): {e}", flush=True)
+                            # RELEASE, not keep: the claim is a `.sending` name
+                            # and every poller scans `.txt`, so a kept claim is
+                            # invisible until the next restart's orphan sweep.
+                            _release_proactive_claim(claim, f"send raised: {e}")
                     else:
-                        # No owner configured is NOT transient — retrying forever
-                        # would spin. Drop it, as before.
-                        print(f"  [proactive] no owner in allowFrom, skipping {claim.name}", flush=True)
-                        claim.unlink(missing_ok=True)
+                        # RELEASE, do not delete. On a host where Slack has no
+                        # owner (no access.json / TOFU never ran) this is the
+                        # ONLY branch that ever runs, and Slack claims generic
+                        # `proactive-*.txt` without consulting proactive_routing
+                        # — so deleting here destroys messages routed to another
+                        # bridge. Measured live by the owner 2026-08-04: 65 such
+                        # events across 52 distinct files on this host.
+                        _release_proactive_claim(claim, "no owner in allowFrom")
 
             # Heartbeat (used by health-check.py)
             now = time.time()
@@ -1543,6 +1544,11 @@ def _no_events_hint_thread():
             flush=True,
         )
 
+
+
+def _release_proactive_claim(claim, reason: str) -> bool:
+    """Adapter binding for the shared claim-release policy (src/proactive_recovery)."""
+    return release_claim(claim, reason)
 
 
 def _recover_orphan_sending_files() -> int:
