@@ -1296,8 +1296,12 @@ def _send_reply(channel: str, thread_ts: str | None, text: str, task_id: str | N
                     text=f"(file access denied: {fpath})",
                     **({"thread_ts": thread_ts} if thread_ts else {}),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                # The deny notice can be the ONLY user-visible output: a body of
+                # just `[file: /blocked]` posts no text chunk, so if this refusal
+                # is swallowed the caller consumes the source and nobody is told.
+                print(f"[Slack] deny-notice chat_postMessage failed: {e}", flush=True)
+                delivered_ok = False
             print(f"  BLOCKED file: {fpath}", flush=True)
         else:
             try:
@@ -1306,8 +1310,10 @@ def _send_reply(channel: str, thread_ts: str | None, text: str, task_id: str | N
                     text=f"(file not found: {fpath})",
                     **({"thread_ts": thread_ts} if thread_ts else {}),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                # Same reasoning as the deny branch above.
+                print(f"[Slack] not-found notice chat_postMessage failed: {e}", flush=True)
+                delivered_ok = False
 
     # Observability: one delivered-reply event. outcome reflects whether the
     # text chunks + file uploads actually succeeded (the helpers swallow API
