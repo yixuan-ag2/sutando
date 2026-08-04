@@ -1485,11 +1485,20 @@ def result_watcher():
                             _send_reply(dm_channel, None, text, access_tier="owner")  # proactive → owner
                             mark_proactive_delivered(STATE_DIR, delivery_id)
                             print(f"  [proactive] sent to {owner_id}: {text[:80]}", flush=True)
+                            # Delete ONLY after a send that did not raise. This
+                            # sat below the if/else, so a rejected DM was caught,
+                            # logged, and the claim removed anyway — destroying
+                            # the message on the owner's notification path. The
+                            # task-reply branch a few lines up already gets this
+                            # right ("Keep both ... so the next poll can retry").
+                            claim.unlink(missing_ok=True)
                         except Exception as e:
-                            print(f"  [proactive] failed: {e}", flush=True)
+                            print(f"  [proactive] failed (keeping {claim.name} for retry): {e}", flush=True)
                     else:
+                        # No owner configured is NOT transient — retrying forever
+                        # would spin. Drop it, as before.
                         print(f"  [proactive] no owner in allowFrom, skipping {claim.name}", flush=True)
-                    claim.unlink(missing_ok=True)
+                        claim.unlink(missing_ok=True)
 
             # Heartbeat (used by health-check.py)
             now = time.time()

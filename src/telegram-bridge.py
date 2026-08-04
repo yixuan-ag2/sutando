@@ -950,9 +950,14 @@ def main():  # pragma: no cover
                                     data={"text_chunks": _s["text_chunks"], "file_count": _s["files_sent"]},
                                 )
                             print(f"  [proactive] sent to {owner_id}: {text[:80]}")
+                            # Delete ONLY after a send that did not raise. This
+                            # sat one level out, so a rejected DM was caught,
+                            # logged, and the file removed anyway — the message
+                            # was destroyed on the owner's notification path.
+                            # Keeping it lets the next poll retry.
+                            f.unlink(missing_ok=True)
                         except Exception as e:
-                            print(f"  [proactive] failed: {e}")
-                        f.unlink(missing_ok=True)
+                            print(f"  [proactive] failed (keeping {f.name} for retry): {e}")
         except Exception as e:
             print(f"  [proactive] poll error: {e}")
 
