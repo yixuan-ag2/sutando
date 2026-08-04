@@ -1194,7 +1194,7 @@ def _send_file(channel: str, thread_ts: str | None, fpath: str) -> bool:
         return False
 
 
-def _send_reply(channel: str, thread_ts: str | None, text: str, task_id: str | None = None, access_tier: str = "unknown") -> None:
+def _send_reply(channel: str, thread_ts: str | None, text: str, task_id: str | None = None, access_tier: str = "unknown") -> bool:
     """Post a reply via chat.postMessage with marker extraction.
 
     Honors the unified marker protocol from `src/result_markers.py` (#873):
@@ -1207,9 +1207,16 @@ def _send_reply(channel: str, thread_ts: str | None, text: str, task_id: str | N
 
     Long text chunked at 4000 chars per Slack message (40k hard cap, but
     readability suffers above ~4k).
+
+    Returns True when the caller may CONSUME the source (delivered, or there
+    was nothing to send) and False when a send was attempted and Slack refused.
+    `chat_postMessage` failures are caught in here and recorded as an error
+    event rather than raised, so a caller gating cleanup on "did not raise"
+    never sees the common failure — it has to consult this value. Purely
+    additive: the annotation was `-> None` and no existing caller reads it.
     """
     if not text:
-        return
+        return True  # nothing to deliver is not a delivery failure
 
     parsed = parse_markers(text)
     clean_text = parsed.body
@@ -1326,6 +1333,8 @@ def _send_reply(channel: str, thread_ts: str | None, text: str, task_id: str | N
             )
         except Exception:  # pragma: no cover  (defensive: result_audit import is safe + record() never raises)
             pass
+
+    return delivered_ok
 
 
 def _record_skip_audit(task_id: str, skip_value: str) -> None:
@@ -1482,10 +1491,19 @@ def result_watcher():
                         try:
                             resp = app.client.conversations_open(users=owner_id)
                             dm_channel = resp["channel"]["id"]
-                            _send_reply(dm_channel, None, text, access_tier="owner")  # proactive → owner
-                            mark_proactive_delivered(STATE_DIR, delivery_id)
-                            print(f"  [proactive] sent to {owner_id}: {text[:80]}", flush=True)
-                            claim.unlink(missing_ok=True)
+                            # Gate on DELIVERY, not on "did not raise":
+                            # `_send_reply` catches chat_postMessage failures
+                            # internally and reports them in its return value,
+                            # so the outer `except` never fires for the normal
+                            # Slack API failure. Marking delivered + unlinking
+                            # on a swallowed failure is how a refused DM became
+                            # a deleted one.
+                            if _send_reply(dm_channel, None, text, access_tier="owner"):  # proactive → owner
+                                mark_proactive_delivered(STATE_DIR, delivery_id)
+                                print(f"  [proactive] sent to {owner_id}: {text[:80]}", flush=True)
+                                claim.unlink(missing_ok=True)
+                            else:
+                                _release_proactive_claim(claim, "Slack refused the send")
                         except Exception as e:
                             # RELEASE, not keep: the claim is a `.sending` name
                             # and every poller scans `.txt`, so a kept claim is

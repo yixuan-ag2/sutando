@@ -132,6 +132,32 @@ def main() -> int:
         check(f"{rel}: no unlink reachable on a failed send", bad == [],
               f"unguarded unlink at line(s) {bad}")
 
+    # --- slack must gate cleanup on the DELIVERY RESULT ---------------------
+    # `_send_reply` catches chat_postMessage failures internally, so the outer
+    # `except` never fires for the normal Slack API failure. Cleanup therefore
+    # has to consult its return value, not merely the absence of an exception.
+    # Guards against a revert to a bare `_send_reply(...)` call followed by an
+    # unconditional unlink — which is how a refused DM became a deleted one.
+    slack_src = (REPO / "src" / "slack-bridge.py").read_text()
+    check("slack: _send_reply exposes delivery success (-> bool)",
+          "def _send_reply(" in slack_src and ') -> bool:' in slack_src,
+          "annotation is still -> None; callers cannot gate on delivery")
+    slack_tree = ast.parse(slack_src)
+    gated = False
+    for node in ast.walk(slack_tree):
+        if not isinstance(node, ast.If):
+            continue
+        # `if _send_reply(...):` with the proactive cleanup inside the body
+        if not (isinstance(node.test, ast.Call)
+                and getattr(node.test.func, "id", None) == "_send_reply"):
+            continue
+        names = {getattr(n.func, "id", None) or getattr(n.func, "attr", None)
+                 for b in node.body for n in ast.walk(b) if isinstance(n, ast.Call)}
+        if "mark_proactive_delivered" in names and "unlink" in names:
+            gated = True
+    check("slack: mark-delivered + unlink sit INSIDE `if _send_reply(...)`",
+          gated, "cleanup runs regardless of whether Slack accepted the message")
+
     # --- do NOT over-fix into "never clean up" -------------------------------
     # Removing the unlink entirely also passes the check above, and would
     # re-send every proactive message forever. Both bridges must still delete
