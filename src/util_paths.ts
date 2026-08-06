@@ -24,7 +24,7 @@
 // intentional).
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { resolveWorkspace } from './workspace_default.js';
@@ -230,6 +230,62 @@ export function claudeHomePath(...subpath: string[]): string {
 	}
 	if (subpath.length === 0) return base;
 	return join(base, ...subpath);
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code project slug — TypeScript twin of util_paths.py's project_slug().
+//
+// Claude Code stores per-project state at `<claude-home>/projects/<slug>/`,
+// where `<slug>` is a slugified form of the project path. That slugification
+// is Claude Code's own private detail — we consume it, we do not define it.
+// Resolve a slug with projectSlug(); never re-derive one inline.
+// ---------------------------------------------------------------------------
+
+/**
+ * Collapse a Claude project slug to a derivation-INDEPENDENT key.
+ *
+ * Two slugs describing the SAME path agree once every run of non-alphanumerics
+ * is collapsed to one `-` and case is folded; unrelated projects do not collide.
+ */
+export function slugDerivationKey(name: string): string {
+	return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+/** Best-effort reproduction of Claude Code's slugification (fallback only). */
+export function slugFormula(path: string): string {
+	return path.replace(/[/. ]/g, '-');
+}
+
+/**
+ * Resolve the Claude Code project-dir slug for a filesystem path.
+ *
+ * **Discovery first, formula second — deliberately.** Every previous version
+ * of this logic hardcoded a formula, and each was a prediction about a detail
+ * Claude Code owns and has already changed (one machine holds both
+ * `...0nw4fhvs4599_zcgpk3fbcnh0000gn...` and `...4599-zcgpk3...` for the same
+ * `/var/folders` family). A formula that is right today stops being right
+ * after an upgrade — and fails silently, because the wrong slug's directory is
+ * simply created on first write. See util_paths.py's project_slug() for the
+ * full rationale; both twins must stay in step.
+ */
+export function projectSlug(path: string): string {
+	const target = slugDerivationKey(path);
+	try {
+		const projects = claudeHomePath('projects');
+		const matches = readdirSync(projects, { withFileTypes: true })
+			.filter(e => e.isDirectory() && slugDerivationKey(e.name) === target)
+			.map(e => e.name);
+		if (matches.length > 0) {
+			// On a split, prefer the most recently modified — the live store.
+			return matches.sort(
+				(a, b) =>
+					statSync(join(projects, b)).mtimeMs - statSync(join(projects, a)).mtimeMs,
+			)[0];
+		}
+	} catch {
+		// No projects dir yet, or unreadable — fall through to the formula.
+	}
+	return slugFormula(path);
 }
 
 // ---------------------------------------------------------------------------

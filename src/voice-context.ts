@@ -7,12 +7,17 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveWorkspace } from './workspace_default.js';
-import { claudeHomePath } from './util_paths.js';
+import { claudeHomePath, projectSlug } from './util_paths.js';
 
 function defaultMemoryDir(): string {
     const repo = resolve(join(import.meta.dirname, '..'));
-    const slug = repo.replace(/\//g, '-');
-    return claudeHomePath('projects', slug, 'memory');
+    // projectSlug() DISCOVERS the dir Claude Code actually created for this
+    // repo. The old inline `repo.replace(/\//g, '-')` mapped only `/`, so on
+    // any install whose path holds a space or a dot — every macOS app-bundle
+    // install under ~/Library/Application Support/ — it named a directory
+    // Claude Code never writes to, and every readMemory() below silently
+    // returned null against it.
+    return claudeHomePath('projects', projectSlug(repo), 'memory');
 }
 
 const MEMORY_DIR = process.env.SUTANDO_MEMORY_DIR || defaultMemoryDir();

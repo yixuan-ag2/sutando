@@ -19,6 +19,7 @@ Usage:
 """
 from __future__ import annotations
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -324,6 +325,91 @@ def claude_home_path(*subpath: str, vanilla: bool = False) -> Path:
     if not subpath:
         return base
     return base.joinpath(*subpath)
+
+
+# ---------------------------------------------------------------------------
+# Claude Code project slug
+#
+# Claude Code stores per-project state at `<claude-home>/projects/<slug>/`,
+# where `<slug>` is a slugified form of the project's filesystem path. The
+# slugification rule is Claude Code's own private detail — we consume it, we
+# do not define it. Resolve a slug with project_slug(); never re-derive one
+# inline.
+# ---------------------------------------------------------------------------
+
+def slug_derivation_key(name: str) -> str:
+    """Collapse a Claude project slug to a derivation-INDEPENDENT key.
+
+    Two slugs describing the SAME path agree once every run of
+    non-alphanumerics is collapsed to one ``-`` and case is folded, while an
+    unrelated project does not collide::
+
+        -Users-me-Library-Application-Support-space-ag2-app-engine-sutando
+        -Users-me-Library-Application Support-space.ag2.app-engine-sutando
+            -> users-me-library-application-support-space-ag2-app-engine-sutando  (same)
+        -Users-me-Documents-unrelated-repo
+            -> users-me-documents-unrelated-repo                                  (different)
+    """
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def _slug_formula(path: "str | Path") -> str:
+    """Best-effort reproduction of Claude Code's slugification.
+
+    Only used when discovery finds nothing (see project_slug). Maps ``/``,
+    ``.`` and spaces to ``-``, which is what the current Claude Code produces
+    for the bundled-install path this fix came from::
+
+        /Users/me/Library/Application Support/space.ag2.app/engine/sutando
+            -> -Users-me-Library-Application-Support-space-ag2-app-engine-sutando
+    """
+    return re.sub(r"[/. ]", "-", str(path))
+
+
+def project_slug(path: "str | Path", *, vanilla: bool = False) -> str:
+    """Resolve the Claude Code project-dir slug for a filesystem path.
+
+    **Discovery first, formula second — deliberately.**
+
+    Every previous version of this logic hardcoded a formula, and each one
+    was a prediction about a detail Claude Code owns and has already changed.
+    Both of these are real project dirs on one machine, for the same
+    ``/var/folders`` family::
+
+        -var-folders-bs-0nw4fhvs4599_zcgpk3fbcnh0000gn-T-agent-state-...   (`_` kept)
+        -private-var-folders-bs-0nw4fhvs4599-zcgpk3fbcnh0000gn-T          (`_` mapped)
+
+    A formula that is right today silently stops being right after a Claude
+    Code upgrade — and it fails in the worst possible way, because nothing
+    errors: the wrong slug's directory is simply *created* on first write, so
+    memory splits across parallel stores and every path-derived reader looks
+    at whichever one it happened to compute. That is precisely how one repo
+    came to own three populated project dirs (sonichi#2723).
+
+    So: look for a project dir that ALREADY EXISTS and describes the same
+    path, comparing through slug_derivation_key() so the comparison does not
+    itself depend on a formula. Use that real directory when found. Fall back
+    to _slug_formula() only when Claude Code has not created one yet — the
+    first-run case, where any answer is a guess and creating the directory is
+    the point.
+
+    On ties (more than one existing dir matching the key — the split this
+    function exists to stop recurring) prefer the most recently modified,
+    which is the one Claude Code is actually writing to.
+    """
+    target = slug_derivation_key(str(path))
+    try:
+        projects = claude_home_path("projects", vanilla=vanilla)
+        matches = [
+            entry for entry in projects.iterdir()
+            if entry.is_dir() and slug_derivation_key(entry.name) == target
+        ]
+        if matches:
+            return max(matches, key=lambda p: p.stat().st_mtime).name
+    except OSError:
+        # No projects dir yet, or unreadable — fall through to the formula.
+        pass
+    return _slug_formula(path)
 
 
 def channel_access_path(source: str) -> Path:

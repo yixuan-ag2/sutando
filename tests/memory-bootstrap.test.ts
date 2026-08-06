@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, existsSync, readFileSync, mkdtempSync, rmSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
+import { projectSlug } from '../src/util_paths.js';
 
 /**
  * Tests for bootstrapMemoryDir() in src/voice-agent.ts.
@@ -11,14 +12,21 @@ import { homedir, tmpdir } from 'node:os';
  * voice-agent.ts loads the entire bodhi runtime + ts-side env reads — same
  * pattern as end-session-gate.test.ts and replay-gate.test.ts.
  *
+ * The replica takes the REPO dir and slugs it with projectSlug(), mirroring
+ * production after sonichi#2723. Before that fix it slugged the WORKSPACE dir
+ * with an inline `/`-only split, which bootstrapped a project dir Claude Code
+ * never opens — and the replica here copied the bug faithfully enough to keep
+ * passing. Slug resolution itself is covered in util-paths-project-slug.test.ts;
+ * what this file pins is the bootstrap behavior around it.
+ *
  * Coverage: directory creation, placeholder MEMORY.md content, no-clobber
  * on existing index, SUTANDO_MEMORY_DIR env override, silent failure when
  * the parent is unwritable.
  */
 
-function bootstrapMemoryDir(workspaceDir: string, envOverride?: string): { memDir: string; created: boolean; error?: string } {
-	const slug = '-' + workspaceDir.replace(/\/$/, '').split('/').filter(Boolean).join('-');
-	const memDir = envOverride || join(homedir(), '.claude', 'projects', slug, 'memory');
+function bootstrapMemoryDir(repoDir: string, envOverride?: string): { memDir: string; created: boolean; error?: string } {
+	const memDir = envOverride
+		|| join(homedir(), '.claude', 'projects', projectSlug(repoDir.replace(/\/$/, '')), 'memory');
 	let created = false;
 	try {
 		mkdirSync(memDir, { recursive: true });
@@ -100,13 +108,13 @@ describe('bootstrapMemoryDir — env override', () => {
 		assert.equal(existsSync(customDir), true);
 	});
 
-	it('derives slug from workspace dir when no override is given', () => {
+	it('derives slug from the repo dir when no override is given', () => {
 		const out = bootstrapMemoryDir('/Users/test/GitHub/sutando');
 		const expected = join(homedir(), '.claude', 'projects', '-Users-test-GitHub-sutando', 'memory');
 		assert.equal(out.memDir, expected);
 	});
 
-	it('strips a trailing slash from the workspace dir before slugging', () => {
+	it('strips a trailing slash from the repo dir before slugging', () => {
 		const out = bootstrapMemoryDir('/Users/test/GitHub/sutando/');
 		const expected = join(homedir(), '.claude', 'projects', '-Users-test-GitHub-sutando', 'memory');
 		assert.equal(out.memDir, expected);

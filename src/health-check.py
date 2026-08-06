@@ -50,7 +50,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 # bends here rather than the guard.
 from git_binary import git_argv  # noqa: E402
 from git_binary import GitUnavailable  # noqa: E402
-from util_paths import _host_label, claude_home_path, shared_personal_path  # noqa: E402
+from util_paths import (  # noqa: E402
+    _host_label,
+    claude_home_path,
+    project_slug,
+    shared_personal_path,
+    slug_derivation_key,
+)
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 from sutando_config import resolve_core_runtime  # noqa: E402
 from cron_entry_digest import digest_map, drifted  # noqa: E402
@@ -86,7 +92,14 @@ def _default_memory_dir() -> str:
     only when it is unset (preserving the old path for ad-hoc launches).
     """
     repo = Path(__file__).parent.parent.resolve()
-    slug = str(repo).replace("/", "-")
+    # project_slug() DISCOVERS the project dir Claude Code actually created
+    # for this repo, falling back to a formula only on first run. The old
+    # inline `str(repo).replace("/", "-")` was a formula that mapped only
+    # `/`, so on any install whose path contains a space or a dot (every
+    # macOS app-bundle install under ~/Library/Application Support/) it named
+    # a directory Claude Code never writes to — and this probe then reported
+    # `ok: not yet created` forever, green against a path that cannot exist.
+    slug = project_slug(repo)
     return str(Path(claude_home_path()) / "projects" / slug / "memory")
 
 # SUTANDO_MEMORY_DIR stays authoritative here, same as everywhere else that
@@ -1157,24 +1170,6 @@ def check_memory_dir_override() -> "dict | None":
     }
 
 
-def _slug_derivation_key(name: str) -> str:
-    """Collapse a Claude project slug to a derivation-INDEPENDENT key.
-
-    Claude Code slugifies a filesystem path, and the derivations differ only in
-    how they map ``.``, spaces and repeated separators. So two slugs describing
-    the SAME path agree once every run of non-alphanumerics is collapsed to one
-    ``-`` and case is folded, while an unrelated project does not collide:
-
-        -Users-me-Library-Application-Support-space.ag2.app-engine-sutando
-        -Users-me-Library-Application-Support-space-ag2-app-engine-sutando
-            -> users-me-library-application-support-space-ag2-app-engine-sutando   (same)
-        -Users-me-Documents-unrelated-repo
-            -> users-me-documents-unrelated-repo                                    (different)
-    """
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-
-
-
 #: Files the workspace-root contract sanctions. Everything else at the root is
 #: drift. Kept next to the probe so adding a legitimate root file is a one-line
 #: edit in the same place a reader looks for the rule.
@@ -1312,13 +1307,13 @@ def check_memory_dir_siblings() -> "dict | None":
     # populated corpus would fire on every normal multi-project home — a
     # permanent false warning that teaches people to ignore the health signal,
     # which costs more than the split it is trying to surface (#2353 review).
-    live_key = _slug_derivation_key(MEMORY_DIR.parent.name)
+    live_key = slug_derivation_key(MEMORY_DIR.parent.name)
     seen: "dict[str, tuple[str, int]]" = {}
     for entry in sorted(projects.iterdir()):
         mem = entry / "memory"
         if not mem.is_dir():
             continue
-        if _slug_derivation_key(entry.name) != live_key:
+        if slug_derivation_key(entry.name) != live_key:
             continue  # unrelated project, not a slug split
         count = len(list(mem.glob("*.md")))
         if count == 0:

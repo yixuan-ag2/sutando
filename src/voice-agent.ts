@@ -36,7 +36,7 @@ import { inlineTools } from './inline-tools.js';
 import { setVisionSession, startVisionControlServer, stopVisionControlServer, setSessionToolUpdater } from './vision-tools.js';
 import { clearActiveArtifact } from './artifact-cache-tools.js';
 import { injectText } from './browser-tools.js';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VoiceSession } from 'bodhi-realtime-agent';
 import type { MainAgent, ToolDefinition } from 'bodhi-realtime-agent';
@@ -47,7 +47,7 @@ import { buildGreeting, buildInstructions, type VoiceConfigContext } from './voi
 import { wireDurableChannels, createSessionRecorder } from './live-agent-runtime.js';
 import { classifyTransportClose, type ClassifiedClose } from './voice-error-classifier.js';
 
-import { sharedPersonalPath, claudeHomePath } from './util_paths.js';
+import { sharedPersonalPath, claudeHomePath, projectSlug } from './util_paths.js';
 
 // Cartesia is loaded dynamically at the bottom of the config section so
 // the `@cartesia/cartesia-js` package is only required when the user has
@@ -668,8 +668,23 @@ const mainAgent: MainAgent = {
 // ($CLAUDE_CONFIG_DIR/projects/-{slug}/memory). Failure-silent: a missing memory
 // dir should never block voice startup.
 function bootstrapMemoryDir(): void {
-	const slug = '-' + WORKSPACE_DIR.replace(/\/$/, '').split('/').filter(Boolean).join('-');
-	const memDir = process.env.SUTANDO_MEMORY_DIR || claudeHomePath('projects', slug, 'memory');
+	// Two bugs lived on the line this replaces, and they compounded.
+	//
+	// It slugged WORKSPACE_DIR, but a Claude Code project is the REPO — so it
+	// bootstrapped a project dir for a path Claude Code never opens (this is
+	// the origin of the stray `...-engine-sutando-workspace` project dirs seen
+	// in the wild). And it re-derived the slug inline by splitting on `/`
+	// only, so on any install whose path holds a space or a dot it missed the
+	// real dir a second time.
+	//
+	// The compounding is what made it invisible: voice-agent INITIALIZED one
+	// directory while voice-context.ts READ another, and neither errored —
+	// mkdir just created whatever it was told. Both now resolve through
+	// projectSlug() against the repo, so writer and reader agree by
+	// construction.
+	const repo = resolve(join(import.meta.dirname, '..'));
+	const memDir = process.env.SUTANDO_MEMORY_DIR
+		|| claudeHomePath('projects', projectSlug(repo), 'memory');
 	try {
 		mkdirSync(memDir, { recursive: true });
 		const indexPath = join(memDir, 'MEMORY.md');
