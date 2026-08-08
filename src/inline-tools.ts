@@ -1103,35 +1103,12 @@ function assertUniqueToolNames(tools: ToolDefinition[]): ToolDefinition[] {
 // Split by manifest `access_tier` so phone-conversation can include
 // owner-tier tools only when the caller is the verified owner. Manifest
 // access_tier values: "owner" (default if omitted) | "any_caller".
-// Cross-instance re-entry guard for the skill loader. An env var, deliberately,
-// not a module-scope flag: a bundled skill `tools.js` can contain its OWN inlined
-// copy of this module (screen-companion dynamic-imports `src/inline-tools.js`, and
-// esbuild inlines it), so a module-scope boolean would live in a different module
-// instance and guard nothing. Once the loader prefers built artifacts, that copy's
-// top-level `await loadSkillManifestTools()` would re-import the very artifact
-// currently mid-evaluation — an ESM cycle through a top-level await, which
-// deadlocks rather than throwing. Voice would hang at boot with no error.
-// process.env is shared by every module instance in the process, so one flag
-// stops the nested scan wherever its copy came from.
+// An env var, not a module-scope flag: a bundled skill artifact can inline its own
+// copy of this module, where a module-scope flag would guard nothing.
 const SKILL_LOADER_ACTIVE_ENV = 'SUTANDO_SKILL_LOADER_ACTIVE';
 
-/** Import candidates for a skill's tools entry, most-preferred first.
- *
- * A manifest declares `"tools": "./tools.ts"`, which only imports under tsx. In
- * production the services run as bundled artifacts under plain node
- * (`<bundled-node> dist/voice-agent.js`), where `await import('…/tools.ts')`
- * throws `Unknown file extension ".ts"` — caught, warned to a log nobody reads,
- * and the tools silently never register. Observed on this host: 11 consecutive
- * voice boots with zoom/screen-companion/obsidian-vault/gws-gmail-voice all
- * failing, while the system prompt kept advertising summon/dismiss/join_zoom to
- * the model as callable.
- *
- * So prefer a compiled sibling, then the build's `dist/skills/<name>/tools.js`
- * artifact, then the declared path (correct under tsx). The dist artifact is only
- * offered for skills scanned from the repo's own `skills/` dir — a workspace or
- * external-plugin skill that happens to share a name must never resolve to the
- * repo's compiled copy.
- */
+// Candidates for a skill's tools entry, most-preferred first. A declared `.ts`
+// only imports under tsx, so a compiled artifact must outrank it.
 export function skillToolsCandidates(skillsDir: string, dirName: string, declared: string): string[] {
 	const rel = declared.replace(/^\.\//, '');
 	const declaredPath = join(skillsDir, dirName, rel);
@@ -1149,9 +1126,7 @@ export function skillToolsCandidates(skillsDir: string, dirName: string, declare
 
 async function loadSkillManifestTools(): Promise<{ owner: ToolDefinition[]; anyCaller: ToolDefinition[] }> {
 	if (process.env[SKILL_LOADER_ACTIVE_ENV] === '1') {
-		// Nested scan (see SKILL_LOADER_ACTIVE_ENV). Returning empty is correct,
-		// not a degradation: the OUTER scan is already collecting every skill, and
-		// this inner caller only wants the base inline tools.
+		// Empty is correct, not a degradation: the outer scan collects every skill.
 		console.warn('[skill-loader] re-entrant load suppressed (a bundled skill embeds its own loader copy)');
 		return { owner: [], anyCaller: [] };
 	}
@@ -1195,9 +1170,8 @@ async function scanSkillManifestTools(): Promise<{ owner: ToolDefinition[]; anyC
 	} catch { /* siblings root unreadable — skip */ }
 	const owner: ToolDefinition[] = [];
 	const anyCaller: ToolDefinition[] = [];
-	// Skills whose tools already loaded, by directory name. Scan order is
-	// public -> workspace -> private -> external, so a later copy of the same skill
-	// failing to load is benign; see the duplicate branch below.
+	// Scan order is public -> workspace -> private -> external, so a later copy of
+	// the same skill failing to load is benign.
 	const loadedSkillNames = new Set<string>();
 	for (const skillsDir of dirsToScan) {
 		if (!existsSync(skillsDir)) continue;
@@ -1234,10 +1208,8 @@ async function scanSkillManifestTools(): Promise<{ owner: ToolDefinition[]; anyC
 						(tier === 'any_caller' ? anyCaller : owner).push(...mod.tools);
 						console.log(`[skill-loader] loaded ${mod.tools.length} tool(s) from ${manifest.name || dirName} [tier=${tier}] (${skillsDir})`);
 					}
-					// A module that imported cleanly but exports no `tools` array is
-					// still a successful load — gws-gmail-voice deliberately exports
-					// an empty set when its CLI is absent. Retrying the next candidate
-					// would import a second copy for no gain.
+					// No `tools` export is still a successful load: a skill may export
+					// an empty set when its CLI is absent.
 					loaded = true;
 					break;
 				} catch (err) {
@@ -1247,17 +1219,12 @@ async function scanSkillManifestTools(): Promise<{ owner: ToolDefinition[]; anyC
 			if (loaded) {
 				loadedSkillNames.add(dirName);
 			} else if (loadedSkillNames.has(dirName)) {
-				// Benign duplicate: the same skill already loaded from an earlier dir
-				// in the scan order, and its tools would win the name-dedupe anyway.
-				// This host has sibling worktree checkouts, each carrying a copy of
-				// skills/ with no dist of its own — so the full diagnostic below fired
-				// once per skill per worktree, six extra multi-line warnings a boot.
-				// Loud where it is actionable, one line where it is not.
+				// Benign duplicate — an earlier copy already won the name dedupe, so
+				// one line instead of the full diagnostic below.
 				console.log(`[skill-loader] ${dirName} already loaded from an earlier dir — skipping copy in ${skillsDir}`);
 			} else {
-				// Name the actual cause. "failed to import" alone sent me looking at
-				// the skill four separate times; the runtime is the problem, not the
-				// skill, and the remedy is a build step rather than an edit here.
+				// Name the runtime as the cause: the remedy is a build step, not an
+				// edit to the skill.
 				const tsUnderNode = errors.some(e => e.includes('Unknown file extension ".ts"'));
 				console.warn(
 					`[skill-loader] could not load ${dirName}/${manifest.tools} from ${skillsDir}` +

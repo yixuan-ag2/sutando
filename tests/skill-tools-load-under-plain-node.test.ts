@@ -1,21 +1,5 @@
-// Manifest skill tools must load when the services run as bundled artifacts
-// under plain node — the production shape (`<bundled-node> dist/voice-agent.js`).
-//
-// The bug: a manifest declares `"tools": "./tools.ts"`, which imports only under
-// tsx. Under plain node `await import('…/tools.ts')` throws
-// `Unknown file extension ".ts"`; the loader caught it, warned, and continued, so
-// the tools silently never registered. Measured on one host: 11 consecutive voice
-// boots with all four skills failing, while the system prompt kept advertising
-// summon/dismiss/join_zoom to the model as callable tools.
-//
-// This is a BEHAVIORAL test, not a source-text one. The sibling inline-tools tests
-// assert against source text with regexes because the module has top-level await
-// and heavy side effects — but a regex would pass on an implementation that
-// resolves the wrong path, which is the entire failure mode here. So case D
-// bundles a probe with esbuild and runs it under plain node, exactly as
-// production does.
-//
-// Run: npx tsx tests/skill-tools-load-under-plain-node.test.ts
+// Manifest skill tools must load under the plain node that runs the bundled
+// artifacts, where a declared `.ts` entry cannot be imported at all.
 
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
@@ -40,13 +24,8 @@ const checkAsync = async (name, fn) => {
 	catch (err) { console.log(`  FAIL ${name}`); failures.push(`${name}: ${err.message}`); }
 };
 
-// skillToolsCandidates is TypeScript; transpile the module to import it here.
-// NOTE: the artifact MUST be emitted into <repo>/dist. inline-tools derives
-// REPO_ROOT from its own module URL (dirname(dirname(import.meta.url))), so a copy
-// bundled to /tmp computes REPO_ROOT=/tmp and can never find <repo>/dist/skills —
-// which silently reproduces the very bug under test. Production emits to
-// <repo>/dist/voice-agent.js, so mirror that. (Learned the hard way: the first
-// version of this test bundled to os.tmpdir() and "failed" for that reason.)
+// The artifact MUST be emitted into <repo>/dist: inline-tools derives REPO_ROOT
+// from its own module URL, so a copy elsewhere cannot find <repo>/dist/skills.
 const TEST_ARTIFACTS = [];
 const { skillToolsCandidates } = await (async () => {
 	const out = join(REPO, 'dist', `.test-inline-tools-${process.pid}.mjs`);
@@ -101,15 +80,8 @@ check('B1 a non-repo skills dir never resolves to the repo dist artifact', () =>
 	rmSync(tmp, { recursive: true, force: true });
 });
 
-// ── C. the re-entry guard ──────────────────────────────────────────────────────
-// Honest scope note: no skill currently re-enters the loader at module scope —
-// screen-companion's `import('../../src/inline-tools.js')` sits inside a function
-// body, so it runs on tool CALL, not on import, and the ESM cycle is not live
-// today. The guard exists because bundling inlines a second copy of this whole
-// module into that artifact, so hoisting that import (or another skill adding a
-// top-level one) would create a cycle through a top-level await — which deadlocks
-// rather than throwing, hanging voice at boot with no error. Asserted here so the
-// guard cannot be quietly deleted as dead code.
+// C. the re-entry guard. Defensive: no skill re-enters at module scope today, but
+// a cycle through a top-level await would deadlock rather than throw.
 check('C1 the guard is cross-instance (env var, not a module-scope flag)', () => {
 	const src = readFileSync(join(REPO, 'src', 'inline-tools.ts'), 'utf8');
 	assert.ok(src.includes("SKILL_LOADER_ACTIVE_ENV = 'SUTANDO_SKILL_LOADER_ACTIVE'"),
